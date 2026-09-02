@@ -443,8 +443,9 @@ class DreamLoRA(TemplateLM):
         ).eval()
         
         # Load LoRA configuration and model
-        peft_config = PeftConfig.from_pretrained(self.lora_path)
-        self.model = PeftModel.from_pretrained(self.model, self.lora_path)
+        if self.lora_path is not None:
+            peft_config = PeftConfig.from_pretrained(self.lora_path)
+            self.model = PeftModel.from_pretrained(self.model, self.lora_path)
         
         # Convert data type only when target_dtype is not None and not "auto"
         if target_dtype is not None and target_dtype != "auto":
@@ -871,6 +872,302 @@ class DreamLoRA(TemplateLM):
         return generated_sequence
 
 
+
+
+    def _generate_block_batch(self, prompts: list) -> list:
+        """
+        Batched generation. All prompts share one forward pass per denoising step.
+        Handles EOS per-request without corrupting other requests or future blocks.
+        """
+        import time
+        self.model.eval()
+
+        mask_id    = self.mask_token_id
+        block_size = self.block_size
+        B          = len(prompts)
+        pad_id     = self.tokenizer.pad_token_id or 0
+
+        dtype_mask = (self.target_dtype
+                      if self.target_dtype is not None and self.target_dtype != "auto"
+                      else torch.bfloat16)
+
+        # Pad all prompts to the same length
+        prompt_lens = [p.shape[1] for p in prompts]
+        max_plen    = max(prompt_lens)
+        padded = []
+        for p, plen in zip(prompts, prompt_lens):
+            if plen < max_plen:
+                pad = torch.full((1, max_plen - plen), pad_id,
+                                 dtype=torch.long, device=self.device)
+                padded.append(torch.cat([p, pad], dim=1))
+            else:
+                padded.append(p)
+        x_t = torch.cat(padded, dim=0).to(self.device)
+
+        # Build batched attention mask: (B, 1, max_length, max_length)
+        single_mask = create_full_block_attention_mask(
+            prompt_length=max_plen, max_length=self.max_length,
+            block_size=block_size, device=self.device, dtype=dtype_mask)
+        full_attention_mask = single_mask.expand(B, -1, -1, -1).contiguous()
+
+        # Per-request EOS tracking
+        eos_detected = [False] * B
+        eos_block    = {}          # ri -> block_id where EOS fired
+
+        # Per-request timing
+        per_req_block_start  = [{} for _ in range(B)]
+        per_req_block_finish = [{} for _ in range(B)]
+        per_req_block_steps  = [{} for _ in range(B)]
+        per_req_mask_count   = {}
+
+        block_states = {
+            0: {
+                'start_pos':   0,
+                'end_pos':     max_plen,
+                'total_masks': max_plen,
+                'mask_count':  0,
+                'state':       'to_cache',
+                'is_complete': True,
+            }
+        }
+        per_req_mask_count[0] = [0] * B
+
+        past_key_values  = None
+        current_blocks   = 0
+        cache_length     = 0
+        total_step_count = 0
+
+        with torch.inference_mode():
+            while True:
+                total_step_count += 1
+
+                # Block addition: gate on slowest request
+                if (len(block_states) - 1 < (self.max_new_tokens // block_size)
+                        and not all(eos_detected)):
+                    last_bid = len(block_states) - 1
+                    bs_last  = block_states[last_bid]
+                    max_mask = max(per_req_mask_count[last_bid])
+                    progress = (bs_last['total_masks'] - max_mask) / bs_last['total_masks']
+                    if progress >= self.block_add_threshold:
+                        new_bid       = len(block_states)
+                        new_start_pos = x_t.shape[1]
+                        new_block     = torch.full(
+                            (B, block_size), mask_id,
+                            dtype=torch.long, device=self.device)
+                        x_t = torch.cat([x_t, new_block], dim=1)
+                        block_states[new_bid] = {
+                            'start_pos':   new_start_pos,
+                            'end_pos':     new_start_pos + block_size,
+                            'total_masks': block_size,
+                            'mask_count':  block_size,
+                            'state':       'active',
+                            'is_complete': False,
+                        }
+                        per_req_mask_count[new_bid] = [block_size] * B
+                        current_blocks += 1
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        t_now = time.perf_counter()
+                        for ri in range(B):
+                            per_req_block_start[ri][new_bid]  = t_now
+                            per_req_block_steps[ri][new_bid]  = 0
+
+                # Sync mask_count into block_states for completion check
+                for bid in block_states:
+                    block_states[bid]['mask_count'] = (
+                        0 if bid not in per_req_mask_count
+                        else max(per_req_mask_count[bid]))
+                self._update_block_completion_states(
+                    block_states, self.decoded_token_threshold)
+
+                mask_index   = (x_t == mask_id)
+                gen_mask_sum = mask_index[:, max_plen:].sum()
+                if gen_mask_sum == 0 and current_blocks == 0:
+                    break
+
+                # Determine input sequence
+                blocks_to_cache = [bid for bid, st in block_states.items()
+                                   if st['state'] == 'to_cache']
+                active_blocks   = [bid for bid, st in block_states.items()
+                                   if st['state'] == 'active']
+                update_kvcache  = 0
+
+                if blocks_to_cache:
+                    e_bid = min(blocks_to_cache); l_bid = max(blocks_to_cache)
+                    update_kvcache = (block_states[l_bid]['end_pos']
+                                     - block_states[e_bid]['start_pos'])
+
+                process_start_pos = cache_length
+                if update_kvcache > 0:
+                    etoc      = min(blocks_to_cache)
+                    input_seq = x_t[:, block_states[etoc]['start_pos']:]
+                    process_start_pos = block_states[etoc]['start_pos']
+                elif active_blocks:
+                    cands = [block_states[b]['start_pos'] for b in active_blocks
+                             if block_states[b]['start_pos'] >= cache_length]
+                    if cands:
+                        ea        = min(cands)
+                        input_seq = x_t[:, ea:]
+                        process_start_pos = ea
+                    else:
+                        if cache_length >= x_t.shape[1]:
+                            break
+                        input_seq = x_t[:, cache_length:]
+                else:
+                    break
+
+                if input_seq.shape[1] == 0:
+                    break
+
+                # Attention mask
+                input_length   = input_seq.shape[1]
+                total_len      = cache_length + input_length
+                extracted_mask = torch.full(
+                    (B, 1, input_length, total_len),
+                    -torch.inf, device=self.device, dtype=dtype_mask)
+                extracted_mask[:, :, :, :cache_length] = (
+                    full_attention_mask[:, :,
+                        process_start_pos:process_start_pos + input_length,
+                        :cache_length])
+                extracted_mask[:, :, :, cache_length:] = (
+                    full_attention_mask[:, :,
+                        process_start_pos:process_start_pos + input_length,
+                        process_start_pos:process_start_pos + input_length])
+
+                outputs = self.model(
+                    input_seq, attention_bias=extracted_mask,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    update_kvcache=update_kvcache + cache_length)
+                logits = outputs.logits
+
+                if update_kvcache > 0:
+                    past_key_values = outputs.past_key_values
+                    for bid in blocks_to_cache:
+                        block_states[bid]['state'] = 'in_cache'
+
+                # Per-request token sampling
+                blocks_to_deactivate = []
+                for block_id in sorted(block_states.keys()):
+                    if block_states[block_id]['state'] != 'active':
+                        continue
+                    b_start     = block_states[block_id]['start_pos']
+                    b_end       = block_states[block_id]['end_pos']
+                    is_complete = block_states[block_id]['is_complete']
+
+                    for ri in range(B):
+                        if eos_detected[ri]:
+                            # EOS already fired for this request.
+                            # If it fired in THIS block, zero remaining masks.
+                            # If it fired in a PREVIOUS block, do nothing —
+                            # this block will deactivate when all requests finish.
+                            if eos_block.get(ri) == block_id:
+                                per_req_mask_count[block_id][ri] = 0
+                                rem = (x_t[ri, b_start:b_end] == mask_id)
+                                if rem.any():
+                                    pos = torch.where(rem)[0]
+                                    for pp in pos:
+                                        x_t[ri, b_start + pp] = pad_id
+                            continue
+
+                        per_req_block_steps[ri][block_id] = (
+                            per_req_block_steps[ri].get(block_id, 0) + 1)
+
+                        req_mask = mask_index[ri, b_start:b_end]
+                        if req_mask.sum() == 0:
+                            continue
+
+                        rel_positions = torch.where(req_mask)[0]
+                        logit_offset  = b_start - process_start_pos
+                        req_logits    = logits[ri, logit_offset + rel_positions, :]
+
+                        confidence, x0, init_conf = sample_tokens(
+                            req_logits, self.temperature,
+                            top_p=self.top_p, top_k=self.top_k,
+                            neg_entropy=(self.sampling_strategy == "neg_entropy"),
+                            margin_confidence=(
+                                self.sampling_strategy == "margin_confidence"))
+
+                        # Force complete if all OTHER requests finished this block
+                        other_done = B > 1 and all(
+                            per_req_mask_count[block_id][rj] == 0
+                            for rj in range(B) if rj != ri)
+                        effective_complete = is_complete or other_done
+
+                        if effective_complete:
+                            high_conf = torch.where(init_conf > self.skip_threshold)[0]
+                            if len(high_conf) == 0:
+                                _, transfer = torch.topk(confidence, 1)
+                            else:
+                                transfer = torch.tensor(
+                                    [], device=self.device, dtype=torch.long)
+                            all_idx = torch.unique(torch.cat([transfer, high_conf]))
+                        else:
+                            all_idx = torch.where(init_conf > self.skip_threshold)[0]
+
+                        if len(all_idx) > 0:
+                            for idx in all_idx:
+                                x_t[ri, b_start + rel_positions[idx]] = x0[idx]
+                            per_req_mask_count[block_id][ri] -= len(all_idx)
+                            per_req_mask_count[block_id][ri] = max(
+                                0, per_req_mask_count[block_id][ri])
+
+                            # EOS detection
+                            eos_id = 126081
+                            for idx in all_idx:
+                                if x0[idx].item() == eos_id:
+                                    eos_detected[ri] = True
+                                    eos_block[ri]    = block_id
+                                    break
+
+                    # Recompute mask_index after fills, then check deactivation
+                    mask_index = (x_t == mask_id)
+                    if mask_index[:, b_start:b_end].sum() == 0:
+                        blocks_to_deactivate.append(block_id)
+
+                for block_id in blocks_to_deactivate:
+                    if block_states[block_id]['state'] == 'active':
+                        can_deactivate = all(
+                            block_states.get(prev, {}).get('state') != 'active'
+                            for prev in range(block_id))
+                        if can_deactivate:
+                            block_states[block_id]['state'] = 'to_cache'
+                            current_blocks -= 1
+                            if torch.cuda.is_available():
+                                torch.cuda.synchronize()
+                            t_now = time.perf_counter()
+                            for ri in range(B):
+                                per_req_block_finish[ri][block_id] = t_now
+
+                if update_kvcache > 0:
+                    cache_length += update_kvcache
+
+                if total_step_count > 10000:
+                    print(f"WARNING: safety limit hit at step {total_step_count}")
+                    print(f"  x_t shape: {x_t.shape}")
+                    print(f"  current_blocks={current_blocks}")
+                    print(f"  gen_masks remaining: {mask_index[:, max_plen:].sum().item()}")
+                    print(f"  block_states: {[(k,v['state'],v.get('mask_count',0)) for k,v in block_states.items()]}")
+                    print(f"  per_req_mask_count: {per_req_mask_count}")
+                    break
+
+        # Assemble results
+        results = []
+        for ri in range(B):
+            plen   = prompt_lens[ri]
+            tokens = x_t[ri, max_plen:].tolist()
+            gen_bids = sorted(b for b in per_req_block_finish[ri] if b > 0)
+            btimes   = [per_req_block_finish[ri][b] - per_req_block_start[ri][b]
+                        for b in gen_bids if b in per_req_block_start[ri]]
+            bsteps   = [per_req_block_steps[ri].get(b, 0) for b in gen_bids]
+            results.append({
+                "tokens":      tokens,
+                "block_times": btimes,
+                "block_steps": bsteps,
+                "confidences": [1.0] * len(btimes),
+                "total_steps": total_step_count,
+            })
+        return results
 
     def generate_until(self, requests: List[Instance], disable_tqdm: bool = False):
         res = []

@@ -1,0 +1,39 @@
+{
+  "expF": [
+    {
+      "staleness_depth": 0,
+      "quality": 0.8170297329484753,
+      "tput": 1.0
+    },
+    {
+      "staleness_depth": 1,
+      "quality": 0.7997115982666082,
+      "tput": 1.12
+    },
+    {
+      "staleness_depth": 2,
+      "quality": 0.7797204964577087,
+      "tput": 1.2544000000000002
+    },
+    {
+      "staleness_depth": 3,
+      "quality": 0.7566565677727436,
+      "tput": 1.4049280000000004
+    },
+    {
+      "staleness_depth": 4,
+      "quality": 0.7289024576233736,
+      "tput": 1.5735193600000006
+    },
+    {
+      "staleness_depth": 6,
+      "quality": 0.6868488869723658,
+      "tput": 1.5735193600000006
+    },
+    {
+      "staleness_depth": 8,
+      "quality": 0.6467531548922997,
+      "tput": 1.5735193600000006
+    }
+  ]
+}

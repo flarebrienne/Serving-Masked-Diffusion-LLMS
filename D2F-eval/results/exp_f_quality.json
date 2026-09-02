@@ -1,0 +1,11 @@
+{
+  "1": {
+    "accuracy": 76.0,
+    "correct": 76,
+    "time": 677.6288617039099,
+    "tput": 0.1475734072904572,
+    "n_wrong": 24,
+    "n_wrong_truncated": 2,
+    "truncated_wrong_pct": 8.333333333333332
+  }
+}

@@ -1243,7 +1243,7 @@ class LLaDAModel(nn.Module):
         # Transform the attention mask into what the blocks expect.
         if attention_mask is not None and 0.0 in attention_mask:
             # shape: (batch_size, 1, 1, seq_len)
-            attention_mask = attention_mask.to(dtype=torch.float).view(batch_size, -1)[:, None, None, :]
+            attention_mask = attention_mask.to(dtype=torch.bfloat16).view(batch_size, -1)[:, None, None, :]
             attention_mask = (1.0 - attention_mask) * torch.finfo(attention_mask.dtype).min
         else:
             attention_mask = None
@@ -1265,7 +1265,7 @@ class LLaDAModel(nn.Module):
             elif attention_bias is None:
                 attention_bias = get_causal_attention_bias(self.__cache, past_length + seq_len, x.device)
             elif attention_bias.dtype in (torch.int8, torch.bool):
-                attention_bias = attention_bias.to(dtype=torch.float)
+                attention_bias = attention_bias.to(dtype=torch.bfloat16)
                 attention_bias.masked_fill_(attention_bias == 0.0, torch.finfo(attention_bias.dtype).min)
 
             # Transform to the right shape and data type.
@@ -1274,7 +1274,7 @@ class LLaDAModel(nn.Module):
                 mask_len = attention_mask.shape[-1]
             elif past_key_values is not None:
                 mask_len = past_key_values[0][0].shape[-2] + seq_len
-            attention_bias = attention_bias[:, :, :mask_len, :mask_len].to(dtype=torch.float)
+            attention_bias = attention_bias[:, :, :mask_len, :mask_len].to(dtype=torch.bfloat16)
 
             # Add in the masking bias.
             if attention_mask is not None:

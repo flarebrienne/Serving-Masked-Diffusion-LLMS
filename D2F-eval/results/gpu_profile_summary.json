@@ -1,0 +1,16 @@
+{
+  "wall_time_s": 10.28030271269381,
+  "peak_mem_mb": 15963.68994140625,
+  "total_steps": null,
+  "category_breakdown_ms": {
+    "attention/matmul": 2881.333010999743,
+    "elementwise/norm": 1353.8249410003104,
+    "memory/copy": 524.5758729998396,
+    "softmax/sampling": 79.43618800002736,
+    "other (uncategorized GPU ops)": 182.41779899994833
+  },
+  "self_cuda_time_total_s": 5.021587811999869,
+  "gpu_utilization_pct": 48.84669209010123,
+  "dispatch_overhead_pct": 51.15330790989877,
+  "excluded_wrapper_artifact_s": 10.275414176000002
+}

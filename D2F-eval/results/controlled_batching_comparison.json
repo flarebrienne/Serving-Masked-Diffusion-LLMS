@@ -1,0 +1,89 @@
+[
+  {
+    "batch_size": 2,
+    "sync_time": 200.17718647886068,
+    "sync_tput": 0.009991148517871721,
+    "sync_steps": [
+      10001,
+      10001
+    ],
+    "cont_time": 11.081959228031337,
+    "cont_tput": 0.1804735028207906,
+    "cont_steps": [
+      null,
+      null
+    ],
+    "overhead_ratio": 0.055360750258130066,
+    "prompt_indices": [
+      0,
+      1
+    ],
+    "gen_length": 512
+  },
+  {
+    "batch_size": 4,
+    "sync_time": 202.48464438971132,
+    "sync_tput": 0.019754584413331683,
+    "sync_steps": [
+      10001,
+      10001,
+      10001,
+      10001
+    ],
+    "cont_time": 23.752307027112693,
+    "cont_tput": 0.16840469413914594,
+    "cont_steps": [
+      null,
+      null,
+      null,
+      null
+    ],
+    "overhead_ratio": 0.11730423854461726,
+    "prompt_indices": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "gen_length": 512
+  },
+  {
+    "batch_size": 8,
+    "sync_time": 214.17823319882154,
+    "sync_tput": 0.0373520683242055,
+    "sync_steps": [
+      10001,
+      10001,
+      10001,
+      10001,
+      10001,
+      10001,
+      10001,
+      10001
+    ],
+    "cont_time": 54.98642505612224,
+    "cont_tput": 0.14549045499566027,
+    "cont_steps": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    "overhead_ratio": 0.2567320882000104,
+    "prompt_indices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "gen_length": 512
+  }
+]

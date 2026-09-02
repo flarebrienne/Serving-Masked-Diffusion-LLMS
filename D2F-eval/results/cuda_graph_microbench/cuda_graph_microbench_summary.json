@@ -1,0 +1,13 @@
+{
+  "eager_mean_ms": 19.391667107120156,
+  "eager_std_ms": 0.7035302084177885,
+  "graph_mean_ms": 9.962024725973606,
+  "graph_std_ms": 0.010510764846431545,
+  "speedup": 1.946558821176282,
+  "saved_ms_per_call": 9.42964238114655,
+  "saved_pct_of_this_call": 48.627290934074516,
+  "logits_allclose": true,
+  "max_abs_logit_diff": 0.0,
+  "n_replay": 200,
+  "prompt_len": 76
+}

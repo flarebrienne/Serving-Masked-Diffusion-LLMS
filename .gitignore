@@ -1,3 +1,6 @@
 d2f_vllm
 evals_*
 *.pyc
+D2F-eval/profile_trace.json
+D2F-eval/*.log
+D2F-eval/slurm-*.out
